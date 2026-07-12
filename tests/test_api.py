@@ -40,6 +40,7 @@ def test_investigation_workspace_and_evidence_contract():
     with TestClient(app) as client:
         page=client.get("/investigations")
         assert page.status_code==200 and "Ranked hypotheses" in page.text
+        assert "ai-spinner" in page.text and "startAgentLoading" in page.text
         queue=client.get("/api/investigations").json()
         assert queue and queue[0]["incident_id"]
         detail=client.get(f"/api/investigations/{queue[0]['incident_id']}").json()

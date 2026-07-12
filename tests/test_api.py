@@ -22,6 +22,9 @@ def test_dashboard_and_chart_data():
         stores=client.get("/api/store-performance").json()
         assert stores and {"store_id","variance_pct","revenue_gap"} <= stores[0].keys()
         assert any(route.path=="/api/refresh" and "POST" in route.methods for route in app.routes)
+        signal=client.get("/api/critical-signal").json()
+        assert signal["active"] is True
+        assert signal["store_id"] and signal["date"] and signal["investigation"]
 
 def test_store_monitoring_page_and_payload():
     with TestClient(app) as client:

@@ -6,6 +6,7 @@ from src.config import RANDOM_SEED, SALES_PATH
 
 def generate_sales(days=240, stores=12, output=SALES_PATH, seed=RANDOM_SEED, shuffle=False):
     rng = np.random.default_rng(seed)
+    incident_store=f"S{(seed%stores)+1:03d}" if shuffle else "S005"
     end = pd.Timestamp("2026-07-10")
     dates = pd.date_range(end=end, periods=days)
     rows = []
@@ -21,7 +22,7 @@ def generate_sales(days=240, stores=12, output=SALES_PATH, seed=RANDOM_SEED, shu
             for daypart, dpf in {"breakfast":.55, "lunch":1.15, "dinner":1.3}.items():
                 event_time=date+pd.Timedelta(hours={"breakfast":8,"lunch":12,"dinner":19}[daypart])
                 for channel, chf in {"dine_in":1.,"takeaway":.7,"kiosk":.58,"delivery":.88,"app":.64}.items():
-                    incident = sid == "S005" and date >= end-pd.Timedelta(days=4) and daypart == "lunch" and channel == "delivery"
+                    incident = sid == incident_store and date >= end-pd.Timedelta(days=4) and daypart == "lunch" and channel == "delivery"
                     weather = 1 + (.012*rain if channel == "delivery" else -.005*rain)
                     channel_sales=base*dpf*chf*weekend*trend*weather*(1.2 if promo else 1)*rng.normal(1,.055)
                     if incident: channel_sales*=.48

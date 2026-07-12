@@ -107,6 +107,15 @@ def evaluation(): return {"forecast":joblib.load(MODEL_PATH)["metrics"],"anomaly
 def anomalies(limit:int=Query(20,ge=1,le=100)):
     return json.loads(pd.read_csv(ANOMALY_PATH).head(limit).to_json(orient="records",date_format="iso"))
 
+@app.get("/api/critical-signal")
+def critical_signal():
+    anomalies=pd.read_csv(ANOMALY_PATH); anomalies["date"]=pd.to_datetime(anomalies.date)
+    if anomalies.empty: return {"active":False,"message":"No actionable operational signals detected"}
+    anomalies["priority_score"]=anomalies.anomaly_score*anomalies.absolute_residual
+    event=anomalies.sort_values(["priority_score","absolute_residual"],ascending=False).iloc[0]
+    report=investigate(event.store_id,str(event.date.date()))
+    return {"active":True,"store_id":event.store_id,"date":str(event.date.date()),"daypart":event.daypart,"channel":event.channel,"severity":event.severity,"residual_pct":float(event.residual_pct),"revenue_gap":int(event.residual),"anomaly_score":float(event.anomaly_score),"headline":f"{event.channel.replace('_',' ').title()} disruption detected at Store {event.store_id}","description":f"{event.daypart.title()} {event.channel.replace('_',' ')} sales are {abs(event.residual_pct):.1%} below forecast with an estimated {abs(event.residual)/1_000_000:.1f}M VND impact.","investigation":report}
+
 @app.get("/api/trend")
 def trend(days:int=Query(14,ge=7,le=30)):
     df=pd.read_csv(FORECAST_PATH,low_memory=False); df["date"]=pd.to_datetime(df.date)

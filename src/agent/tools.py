@@ -15,7 +15,7 @@ def get_anomaly_event(incident_id,**_):
     return {"store_id":e.store_id,"date":str(e.date.date()),"region":e.region,"daypart":e.daypart,"channel":e.channel,"severity":e.severity,"actual_sales":int(e.actual_sales),"forecast_sales":int(e.forecast_sales),"revenue_gap":int(e.residual),"residual_pct":round(float(e.residual_pct),4),"anomaly_score":round(float(e.anomaly_score),4)}
 
 def _day(incident_id):
-    e=_event(incident_id); df=pd.read_csv(FORECAST_PATH); df["date"]=pd.to_datetime(df.date)
+    e=_event(incident_id); df=pd.read_csv(FORECAST_PATH,low_memory=False); df["date"]=pd.to_datetime(df.date)
     return e,df[(df.store_id==e.store_id)&(df.date==e.date)].copy(),df
 
 def get_channel_breakdown(incident_id,**_):
@@ -26,14 +26,18 @@ def get_daypart_breakdown(incident_id,**_):
     _,day,_=_day(incident_id); x=day.groupby("daypart")[["actual_sales","forecast_sales","transaction_count"]].sum(); x["revenue_gap"]=x.actual_sales-x.forecast_sales; x["variance_pct"]=x.revenue_gap/x.forecast_sales.clip(lower=1)
     return json.loads(x.reset_index().to_json(orient="records"))
 
+def get_product_breakdown(incident_id,**_):
+    _,day,_=_day(incident_id); x=day.groupby("product_category")[["actual_sales","forecast_sales","quantity"]].sum(); x["revenue_gap"]=x.actual_sales-x.forecast_sales; x["variance_pct"]=x.revenue_gap/x.forecast_sales.clip(lower=1)
+    return json.loads(x.reset_index().sort_values("revenue_gap").to_json(orient="records"))
+
 def get_peer_comparison(incident_id,**_):
     e,_,df=_day(incident_id); peers=df[(df.date==e.date)&(df.region==e.region)&(df.store_id!=e.store_id)]
     x=peers.groupby("store_id")[["actual_sales","forecast_sales"]].sum(); variance=(x.actual_sales-x.forecast_sales)/x.forecast_sales.clip(lower=1)
     return {"store_variance_pct":round(float(e.residual_pct),4),"peer_median_variance_pct":round(float(variance.median()),4),"peer_count":len(x),"assessment":"store_specific" if e.residual_pct<variance.median()-.08 else "regional_or_market"}
 
 def get_operational_signals(incident_id,**_):
-    e,day,_=_day(incident_id); focus=day[(day.daypart==e.daypart)&(day.channel==e.channel)].iloc[0]
-    return {"delivery_eta":{"observed":float(focus.delivery_eta),"baseline":27,"delta":round(float(focus.delivery_eta-27),1)},"stockout":{"observed":bool(focus.stockout_flag)},"transactions":{"observed":int(focus.transaction_count),"estimated_last_week":round(float(focus.lag_7/max(focus.average_order_value,1))),"change_pct":round(float(focus.transaction_count/max(focus.lag_7/max(focus.average_order_value,1),1)-1),3)},"weather":{"rainfall":float(focus.rainfall),"temperature":float(focus.temperature)},"promotion_active":bool(focus.promotion_flag)}
+    e,day,_=_day(incident_id); focus=day[(day.daypart==e.daypart)&(day.channel==e.channel)]; eta=float(focus.delivery_eta.mean()); tx=int(focus.transaction_count.sum()); baseline_tx=float(focus.lag_7.sum()/max(focus.average_order_value.mean(),1))
+    return {"delivery_eta":{"observed":eta,"baseline":27,"delta":round(eta-27,1)},"stockout":{"observed":bool(focus.stockout_flag.max()),"affected_categories":focus.loc[focus.stockout_flag.astype(bool),"product_category"].unique().tolist()},"transactions":{"observed":tx,"estimated_last_week":round(baseline_tx),"change_pct":round(float(tx/max(baseline_tx,1)-1),3)},"weather":{"rainfall":float(focus.rainfall.mean()),"temperature":float(focus.temperature.mean())},"promotion_active":bool(focus.promotion_flag.max())}
 
 def get_recommended_actions(incident_id,**_):
     e=_event(incident_id); actions=[{"action":"Verify delivery platform availability and integration","owner":"Store manager","confidence":.88,"impact_low":int(e.absolute_residual*.28),"impact_high":int(e.absolute_residual*.48),"effort":"low"},{"action":"Restore delivery ETA through staffing and kitchen throughput checks","owner":"Operations lead","confidence":.82,"impact_low":int(e.absolute_residual*.20),"impact_high":int(e.absolute_residual*.38),"effort":"medium"}]
@@ -47,11 +51,12 @@ def run_what_if(incident_id,delivery_recovery=.5,promotion_uplift=0,**_):
 def get_external_signals(incident_id,**_):
     return external_context(_event(incident_id).store_id)
 
-TOOL_HANDLERS={"get_anomaly_event":get_anomaly_event,"get_channel_breakdown":get_channel_breakdown,"get_daypart_breakdown":get_daypart_breakdown,"get_peer_comparison":get_peer_comparison,"get_operational_signals":get_operational_signals,"get_external_signals":get_external_signals,"get_recommended_actions":get_recommended_actions,"run_what_if":run_what_if}
+TOOL_HANDLERS={"get_anomaly_event":get_anomaly_event,"get_channel_breakdown":get_channel_breakdown,"get_daypart_breakdown":get_daypart_breakdown,"get_product_breakdown":get_product_breakdown,"get_peer_comparison":get_peer_comparison,"get_operational_signals":get_operational_signals,"get_external_signals":get_external_signals,"get_recommended_actions":get_recommended_actions,"run_what_if":run_what_if}
 TOOL_DEFINITIONS=[{"type":"function","name":name,"description":desc,"parameters":params,"strict":True} for name,desc,params in [
  ("get_anomaly_event","Get the anomaly's core metrics and business impact.",{"type":"object","properties":{},"additionalProperties":False}),
  ("get_channel_breakdown","Compare actual and forecast performance by sales channel.",{"type":"object","properties":{},"additionalProperties":False}),
  ("get_daypart_breakdown","Compare actual and forecast performance by daypart.",{"type":"object","properties":{},"additionalProperties":False}),
+ ("get_product_breakdown","Compare actual and forecast performance by product category.",{"type":"object","properties":{},"additionalProperties":False}),
  ("get_peer_comparison","Compare the store with regional peer stores.",{"type":"object","properties":{},"additionalProperties":False}),
  ("get_operational_signals","Get ETA, stock-out, transaction, weather, and promotion evidence.",{"type":"object","properties":{},"additionalProperties":False}),
  ("get_external_signals","Get normalized Apify delivery-platform, review sentiment, and competitor intelligence.",{"type":"object","properties":{},"additionalProperties":False}),

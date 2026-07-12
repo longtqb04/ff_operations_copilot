@@ -32,8 +32,9 @@ def test_store_monitoring_page_and_payload():
         payload=client.get("/api/store-monitor/S005",params={"days":14}).json()
         assert payload["store"]["status"]=="critical"
         assert len(payload["timeline"])==14
-        assert len(payload["channels"])==3
-        assert len(payload["dayparts"])==9
+        assert len(payload["channels"])==5
+        assert len(payload["dayparts"])==15
+        assert len(payload["products"])==7
         assert payload["incidents"]
 
 def test_investigation_workspace_and_evidence_contract():
@@ -85,3 +86,13 @@ def test_what_if_studio_and_scenario_guardrails():
         assert len(scenario["sensitivity"])==5
         assert 0 < scenario["scenario"]["confidence"] <= 1
         assert "not guaranteed causal" in scenario["disclaimer"]
+
+def test_track_success_metrics_and_expanded_dimensions():
+    with TestClient(app) as client:
+        evaluation=client.get("/api/evaluation").json()
+        assert evaluation["forecast"]["daily_store_mape"]<=.10
+        assert evaluation["anomaly_detection"]["precision"]>=.80
+        assert evaluation["anomaly_detection"]["p95_detection_lag_minutes"]<120
+        payload=client.get("/api/store-monitor/S005",params={"days":14}).json()
+        assert {x["channel"] for x in payload["channels"]}=={"dine_in","takeaway","kiosk","delivery","app"}
+        assert {x["product_category"] for x in payload["products"]}=={"chicken","burger","rice","sides","beverage","dessert","combo"}

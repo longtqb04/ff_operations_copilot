@@ -19,19 +19,27 @@ def generate_sales(days=240, stores=12, output=SALES_PATH, seed=RANDOM_SEED, shu
             temp = rng.normal(29, 2.5); promo = int(rng.random() < .18)
             holiday = int((date.month, date.day) in {(1, 1), (4, 30), (5, 1)})
             for daypart, dpf in {"breakfast":.55, "lunch":1.15, "dinner":1.3}.items():
-                for channel, chf in {"dine_in":1., "takeaway":.7, "delivery":.88}.items():
+                event_time=date+pd.Timedelta(hours={"breakfast":8,"lunch":12,"dinner":19}[daypart])
+                for channel, chf in {"dine_in":1.,"takeaway":.7,"kiosk":.58,"delivery":.88,"app":.64}.items():
                     incident = sid == "S005" and date >= end-pd.Timedelta(days=4) and daypart == "lunch" and channel == "delivery"
                     weather = 1 + (.012*rain if channel == "delivery" else -.005*rain)
-                    sales = base*dpf*chf*weekend*trend*weather*(1.2 if promo else 1)*rng.normal(1,.075)
-                    if incident: sales *= .48
-                    aov = rng.uniform(115000,155000)*(1.04 if promo else 1); tx=max(1,round(sales/aov))
-                    rows.append({"store_id":sid,"date":date,"daypart":daypart,"channel":channel,
-                      "region":region,"store_type":store_type,"actual_sales":round(sales),
-                      "transaction_count":tx,"average_order_value":round(sales/tx),
-                      "promotion_flag":promo,"rainfall":round(rain,2),"temperature":round(temp,2),
-                      "holiday_flag":holiday,"delivery_eta":round(rng.normal(47 if incident else 27,3),1),
-                      "stockout_flag":int(incident and rng.random()<.35)})
-    df=pd.DataFrame(rows).sort_values(["store_id","daypart","channel","date"])
+                    channel_sales=base*dpf*chf*weekend*trend*weather*(1.2 if promo else 1)*rng.normal(1,.055)
+                    if incident: channel_sales*=.48
+                    product_mix={"chicken":.34,"burger":.16,"rice":.14,"sides":.10,"beverage":.10,"dessert":.06,"combo":.10}
+                    for category,share in product_mix.items():
+                        sales=max(1,channel_sales*share*rng.normal(1,.04)); stockout=int(incident and category in {"chicken","combo"})
+                        if stockout: sales*=.72
+                        item_price={"chicken":82000,"burger":65000,"rice":59000,"sides":35000,"beverage":28000,"dessert":32000,"combo":145000}[category]
+                        quantity=max(1,round(sales/item_price)); tx=max(1,round(quantity*rng.uniform(.72,.95)))
+                        rows.append({"store_id":sid,"date":date,"event_timestamp":event_time,"daypart":daypart,"channel":channel,"product_category":category,
+                          "region":region,"store_type":store_type,"actual_sales":round(sales),"quantity":quantity,
+                          "transaction_count":tx,"average_order_value":round(sales/tx),"promotion_flag":promo,
+                          "promotion_type":"bundle" if promo else "none","rainfall":round(rain,2),"temperature":round(temp,2),
+                          "holiday_flag":holiday,"delivery_partner":"aggregator_a" if channel=="delivery" else "owned_or_na",
+                          "delivery_eta":round(rng.normal(47 if incident else 27,2.5),1),"stockout_flag":stockout,
+                          "is_actionable_anomaly":incident,"incident_started_at":event_time if incident else pd.NaT,
+                          "data_available_at":event_time+pd.Timedelta(minutes=35 if incident else 45)})
+    df=pd.DataFrame(rows).sort_values(["store_id","daypart","channel","product_category","date"])
     if shuffle:
         df=df.sample(frac=1,random_state=seed).reset_index(drop=True)
     output.parent.mkdir(parents=True,exist_ok=True); df.to_csv(output,index=False); return df

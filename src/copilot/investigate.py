@@ -2,7 +2,7 @@ import pandas as pd
 from src.config import FORECAST_PATH
 
 def investigate(store_id, date, source=FORECAST_PATH):
-    df = pd.read_csv(source)
+    df = pd.read_csv(source,low_memory=False)
     df["date"] = pd.to_datetime(df.date)
     target = pd.Timestamp(date)
     store=df[(df.store_id==store_id)&(df.date==target)].copy()
@@ -14,9 +14,10 @@ def investigate(store_id, date, source=FORECAST_PATH):
     gap = actual - forecast
     channel = store.groupby("channel")[["actual_sales","forecast_sales"]].sum(); channel["gap"]=channel.actual_sales-channel.forecast_sales
     daypart = store.groupby("daypart")[["actual_sales","forecast_sales"]].sum(); daypart["gap"]=daypart.actual_sales-daypart.forecast_sales
+    product = store.groupby("product_category")[["actual_sales","forecast_sales"]].sum(); product["gap"]=product.actual_sales-product.forecast_sales
     peers=df[(df.date==target)&(df.region==store.region.iloc[0])&(df.store_id!=store_id)].groupby("store_id")[["actual_sales","forecast_sales"]].sum()
     peer_delta=((peers.actual_sales-peers.forecast_sales)/peers.forecast_sales.clip(lower=1)).median() if len(peers) else 0
-    worst_channel=channel.gap.idxmin(); worst_daypart=daypart.gap.idxmin()
+    worst_channel=channel.gap.idxmin(); worst_daypart=daypart.gap.idxmin(); worst_product=product.gap.idxmin()
     subset=store[(store.channel==worst_channel)&(store.daypart==worst_daypart)]
     eta=float(subset.delivery_eta.mean()); residual_pct=gap/max(forecast,1); actions=[]
     if worst_channel=="delivery": actions.append({"action":"Verify delivery platform availability and integration","priority":1,"confidence":.88})
@@ -26,7 +27,7 @@ def investigate(store_id, date, source=FORECAST_PATH):
     return {"store_id":store_id,"date":str(target.date()),"actual_sales":int(actual),"forecast_sales":int(forecast),"revenue_gap":int(gap),
       "residual_pct":round(float(residual_pct),4),"peer_median_residual_pct":round(float(peer_delta),4),
       "scope_assessment":"store_specific" if residual_pct<peer_delta-.08 else "regional_or_market",
-      "drivers":[{"driver":f"{worst_channel} channel","revenue_gap":int(channel.loc[worst_channel,"gap"])},{"driver":f"{worst_daypart} daypart","revenue_gap":int(daypart.loc[worst_daypart,"gap"])},{"driver":"delivery ETA","observed":round(eta,1),"unit":"minutes"}],
+      "drivers":[{"driver":f"{worst_channel} channel","revenue_gap":int(channel.loc[worst_channel,"gap"])},{"driver":f"{worst_daypart} daypart","revenue_gap":int(daypart.loc[worst_daypart,"gap"])},{"driver":f"{worst_product} product category","revenue_gap":int(product.loc[worst_product,"gap"])},{"driver":"delivery ETA","observed":round(eta,1),"unit":"minutes"}],
       "recommended_actions":actions,"executive_summary":f"{store_id} recorded sales {abs(residual_pct):.1%} {'below' if gap<0 else 'above'} forecast. The largest gap was in {worst_channel} during {worst_daypart}; peer stores were {peer_delta:+.1%} versus forecast.",
       "disclaimer":"Drivers are evidence-based associations; they are not guaranteed causal effects."}
 

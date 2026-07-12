@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 load_dotenv()
 from src.anomaly.detect import detect_anomalies
-from src.config import ANOMALY_PATH, FORECAST_PATH, MODEL_PATH, SALES_PATH
+from src.config import ANOMALY_PATH, ANOMALY_METRICS_PATH, FORECAST_PATH, MODEL_PATH, SALES_PATH
 from src.copilot.investigate import investigate, simulate
 from src.data.generate import generate_sales
 from src.forecasting.pipeline import train_and_predict
@@ -21,7 +21,7 @@ from src.external.apify import external_context,ingest_webhook,run_configured_ac
 def ensure_artifacts():
     if not SALES_PATH.exists(): generate_sales()
     if not MODEL_PATH.exists() or not FORECAST_PATH.exists(): train_and_predict()
-    if not ANOMALY_PATH.exists(): detect_anomalies()
+    if not ANOMALY_PATH.exists() or not ANOMALY_METRICS_PATH.exists(): detect_anomalies()
 
 @asynccontextmanager
 async def lifespan(_):
@@ -97,8 +97,11 @@ def refresh_data():
 
 @app.get("/api/overview")
 def overview():
-    df=pd.read_csv(FORECAST_PATH); anomalies=pd.read_csv(ANOMALY_PATH); metrics=joblib.load(MODEL_PATH)["metrics"]
-    return {"actual_sales":int(df.actual_sales.sum()),"forecast_sales":int(df.forecast_sales.sum()),"revenue_gap":int((df.actual_sales-df.forecast_sales).sum()),"anomaly_count":len(anomalies),"stores_at_risk":int(anomalies.store_id.nunique()) if len(anomalies) else 0,"model_metrics":metrics}
+    df=pd.read_csv(FORECAST_PATH,low_memory=False); anomalies=pd.read_csv(ANOMALY_PATH); metrics=joblib.load(MODEL_PATH)["metrics"]; anomaly_metrics=json.loads(ANOMALY_METRICS_PATH.read_text(encoding="utf-8"))
+    return {"actual_sales":int(df.actual_sales.sum()),"forecast_sales":int(df.forecast_sales.sum()),"revenue_gap":int((df.actual_sales-df.forecast_sales).sum()),"anomaly_count":len(anomalies),"stores_at_risk":int(anomalies.store_id.nunique()) if len(anomalies) else 0,"model_metrics":metrics,"anomaly_metrics":anomaly_metrics}
+
+@app.get("/api/evaluation")
+def evaluation(): return {"forecast":joblib.load(MODEL_PATH)["metrics"],"anomaly_detection":json.loads(ANOMALY_METRICS_PATH.read_text(encoding="utf-8")),"targets":{"daily_store_mape_max":.10,"anomaly_precision_min":.80,"detection_lag_minutes_max":120}}
 
 @app.get("/api/anomalies")
 def anomalies(limit:int=Query(20,ge=1,le=100)):
@@ -106,14 +109,14 @@ def anomalies(limit:int=Query(20,ge=1,le=100)):
 
 @app.get("/api/trend")
 def trend(days:int=Query(14,ge=7,le=30)):
-    df=pd.read_csv(FORECAST_PATH); df["date"]=pd.to_datetime(df.date)
+    df=pd.read_csv(FORECAST_PATH,low_memory=False); df["date"]=pd.to_datetime(df.date)
     daily=df.groupby("date",as_index=False)[["actual_sales","forecast_sales"]].sum().tail(days)
     daily["revenue_gap"]=daily.actual_sales-daily.forecast_sales
     return json.loads(daily.to_json(orient="records",date_format="iso"))
 
 @app.get("/api/store-performance")
 def store_performance(limit:int=Query(8,ge=3,le=20)):
-    df=pd.read_csv(FORECAST_PATH)
+    df=pd.read_csv(FORECAST_PATH,low_memory=False)
     stores=df.groupby(["store_id","region"],as_index=False)[["actual_sales","forecast_sales"]].sum()
     stores["revenue_gap"]=stores.actual_sales-stores.forecast_sales
     stores["variance_pct"]=stores.revenue_gap/stores.forecast_sales.clip(lower=1)
@@ -122,13 +125,13 @@ def store_performance(limit:int=Query(8,ge=3,le=20)):
 
 @app.get("/api/stores")
 def stores():
-    df=pd.read_csv(FORECAST_PATH)
+    df=pd.read_csv(FORECAST_PATH,low_memory=False)
     result=df[["store_id","region","store_type"]].drop_duplicates().sort_values("store_id")
     return json.loads(result.to_json(orient="records"))
 
 @app.get("/api/store-monitor/{store_id}")
 def store_monitor(store_id:str,days:int=Query(14,ge=7,le=30)):
-    df=pd.read_csv(FORECAST_PATH); df["date"]=pd.to_datetime(df.date); store_id=store_id.upper()
+    df=pd.read_csv(FORECAST_PATH,low_memory=False); df["date"]=pd.to_datetime(df.date); store_id=store_id.upper()
     store=df[df.store_id==store_id].copy()
     if store.empty: raise HTTPException(status_code=404,detail="Store not found")
     max_date=store.date.max(); recent=store[store.date>max_date-pd.Timedelta(days=days)]
@@ -136,6 +139,7 @@ def store_monitor(store_id:str,days:int=Query(14,ge=7,le=30)):
     timeline=recent.groupby("date",as_index=False)[["actual_sales","forecast_sales"]].sum(); timeline["revenue_gap"]=timeline.actual_sales-timeline.forecast_sales
     channels=recent.groupby("channel",as_index=False)[["actual_sales","forecast_sales","transaction_count"]].sum(); channels["revenue_gap"]=channels.actual_sales-channels.forecast_sales; channels["variance_pct"]=channels.revenue_gap/channels.forecast_sales.clip(lower=1)
     dayparts=recent.groupby(["daypart","channel"],as_index=False)[["actual_sales","forecast_sales"]].sum(); dayparts["variance_pct"]=(dayparts.actual_sales-dayparts.forecast_sales)/dayparts.forecast_sales.clip(lower=1)
+    products=recent.groupby("product_category",as_index=False)[["actual_sales","forecast_sales","quantity"]].sum(); products["revenue_gap"]=products.actual_sales-products.forecast_sales; products["variance_pct"]=products.revenue_gap/products.forecast_sales.clip(lower=1)
     all_recent=df[df.date>max_date-pd.Timedelta(days=days)].copy(); summary=all_recent.groupby(["store_id","region"],as_index=False)[["actual_sales","forecast_sales"]].sum(); summary["variance_pct"]=(summary.actual_sales-summary.forecast_sales)/summary.forecast_sales.clip(lower=1)
     region=store.region.iloc[0]; peer=summary[(summary.region==region)&(summary.store_id!=store_id)].variance_pct.median(); network=summary.variance_pct.median()
     anomalies=pd.read_csv(ANOMALY_PATH); incidents=anomalies[anomalies.store_id==store_id].copy()
@@ -144,7 +148,7 @@ def store_monitor(store_id:str,days:int=Query(14,ge=7,le=30)):
       "kpis":{"actual_sales":int(actual),"forecast_sales":int(forecast),"revenue_gap":int(gap),"variance_pct":float(gap/max(forecast,1)),"transaction_count":tx,"average_order_value":aov,"anomaly_count":len(incidents),"estimated_recoverable_revenue":int(max(0,-gap)*.45)},
       "benchmark":{"store":float(gap/max(forecast,1)),"peer_median":float(peer),"region":float(summary[summary.region==region].variance_pct.median()),"network":float(network)},
       "signals":[{"name":"Delivery ETA","value":round(eta,1),"unit":"min","status":"critical" if eta>35 else "normal"},{"name":"Stock-out events","value":stockouts,"unit":"events","status":"warning" if stockouts else "normal"},{"name":"Promotion coverage","value":round(float(recent.promotion_flag.mean()*100),1),"unit":"%","status":"context"},{"name":"Average rainfall","value":round(float(recent.rainfall.mean()),1),"unit":"mm","status":"context"}],
-      "timeline":json.loads(timeline.to_json(orient="records",date_format="iso")),"channels":json.loads(channels.to_json(orient="records")),"dayparts":json.loads(dayparts.to_json(orient="records")),"ranking":json.loads(summary.sort_values("variance_pct").to_json(orient="records")),"incidents":json.loads(incidents.head(10).to_json(orient="records",date_format="iso"))}
+      "timeline":json.loads(timeline.to_json(orient="records",date_format="iso")),"channels":json.loads(channels.to_json(orient="records")),"dayparts":json.loads(dayparts.to_json(orient="records")),"products":json.loads(products.sort_values("revenue_gap").to_json(orient="records")),"ranking":json.loads(summary.sort_values("variance_pct").to_json(orient="records")),"incidents":json.loads(incidents.head(10).to_json(orient="records",date_format="iso"))}
     return payload
 
 @app.get("/api/investigations")
@@ -163,13 +167,13 @@ def investigation_detail(incident_id:str):
     match=anomalies[anomalies.incident_id==incident_id]
     if match.empty: raise HTTPException(status_code=404,detail="Investigation not found")
     event=match.iloc[0]; date=str(event.date.date()); report=investigate(event.store_id,date)
-    df=pd.read_csv(FORECAST_PATH); df["date"]=pd.to_datetime(df.date)
-    series=df[(df.store_id==event.store_id)&(df.daypart==event.daypart)&(df.channel==event.channel)&(df.date.between(event.date-pd.Timedelta(days=6),event.date+pd.Timedelta(days=2)))][["date","actual_sales","forecast_sales","delivery_eta","stockout_flag"]]
+    df=pd.read_csv(FORECAST_PATH,low_memory=False); df["date"]=pd.to_datetime(df.date)
+    series=df[(df.store_id==event.store_id)&(df.daypart==event.daypart)&(df.channel==event.channel)&(df.date.between(event.date-pd.Timedelta(days=6),event.date+pd.Timedelta(days=2)))].groupby("date",as_index=False).agg(actual_sales=("actual_sales","sum"),forecast_sales=("forecast_sales","sum"),delivery_eta=("delivery_eta","mean"),stockout_flag=("stockout_flag","max"))
     peer=df[(df.date==event.date)&(df.region==event.region)&(df.store_id!=event.store_id)&(df.daypart==event.daypart)&(df.channel==event.channel)]
-    peer_variance=float(((peer.actual_sales-peer.forecast_sales)/peer.forecast_sales.clip(lower=1)).median()) if len(peer) else 0
+    peer_group=peer.groupby("store_id")[["actual_sales","forecast_sales"]].sum(); peer_variance=float(((peer_group.actual_sales-peer_group.forecast_sales)/peer_group.forecast_sales.clip(lower=1)).median()) if len(peer_group) else 0
     baseline_tx=event.lag_7/max(event.average_order_value,1); tx_change=float(event.transaction_count/max(baseline_tx,1)-1); eta_delta=float(event.delivery_eta-27)
     evidence=[{"label":"Delivery transactions","current":int(event.transaction_count),"baseline":round(baseline_tx),"change_pct":round(tx_change,3),"source":"POS transactions","confidence":.94,"signal":"critical"},{"label":"Delivery ETA","current":round(float(event.delivery_eta),1),"baseline":27,"unit":"minutes","change":round(eta_delta,1),"source":"Delivery operations","confidence":.88,"signal":"critical" if eta_delta>8 else "normal"},{"label":"Peer performance","current":round(peer_variance,3),"baseline":0,"unit":"variance","source":"Peer store cluster","confidence":.91,"signal":"normal"},{"label":"Product availability","current":int(event.stockout_flag),"baseline":0,"unit":"events","source":"Inventory signal","confidence":.76,"signal":"warning" if event.stockout_flag else "normal"}]
-    hypotheses=[{"title":"Delivery platform or integration disruption","confidence":.87,"impact":int(event.absolute_residual*.62),"support":["Delivery revenue materially below forecast","Peer stores remained stable","Issue isolated to delivery channel"],"contradiction":"Platform uptime confirmation not yet available"},{"title":"Kitchen throughput increased delivery ETA","confidence":.82,"impact":int(event.absolute_residual*.25),"support":[f"Delivery ETA increased to {event.delivery_eta:.0f} minutes","Lunch is the affected daypart"],"contradiction":"Direct kitchen telemetry is unavailable"},{"title":"Top-product stock-out reduced conversion","confidence":.76 if event.stockout_flag else .42,"impact":int(event.absolute_residual*.13),"support":["Inventory signal detected" if event.stockout_flag else "No confirmed stock-out on this record"],"contradiction":"Category-level sales are not yet connected"}]
+    hypotheses=[{"title":"Delivery platform or integration disruption","confidence":.87,"impact":int(event.absolute_residual*.62),"support":["Delivery revenue materially below forecast","Peer stores remained stable","Issue isolated to delivery channel"],"contradiction":"Platform uptime confirmation not yet available"},{"title":"Kitchen throughput increased delivery ETA","confidence":.82,"impact":int(event.absolute_residual*.25),"support":[f"Delivery ETA increased to {event.delivery_eta:.0f} minutes","Lunch is the affected daypart"],"contradiction":"Direct kitchen telemetry is unavailable"},{"title":"Top-product stock-out reduced conversion","confidence":.76 if event.stockout_flag else .42,"impact":int(event.absolute_residual*.13),"support":["Item-level category sales and inventory signal detected" if event.stockout_flag else "No confirmed stock-out on this record"],"contradiction":"Exact SKU availability telemetry is not connected"}]
     actions=[]
     for i,a in enumerate(report["recommended_actions"]): actions.append({**a,"expected_impact_low":int(event.absolute_residual*(.28-.04*i)),"expected_impact_high":int(event.absolute_residual*(.48-.05*i)),"effort":["low","medium","low"][min(i,2)],"owner":["Store manager","Operations lead","Inventory lead"][min(i,2)]})
     return {"incident":{"incident_id":incident_id,"store_id":event.store_id,"date":date,"region":event.region,"daypart":event.daypart,"channel":event.channel,"severity":event.severity,"status":"new","actual_sales":int(event.actual_sales),"forecast_sales":int(event.forecast_sales),"revenue_gap":int(event.residual),"residual_pct":float(event.residual_pct),"anomaly_score":float(event.anomaly_score)},"summary":report["executive_summary"],"scope_assessment":report["scope_assessment"],"peer_variance":peer_variance,"timeline":json.loads(series.to_json(orient="records",date_format="iso")),"decomposition":report["drivers"],"evidence":evidence,"hypotheses":hypotheses,"actions":actions,"disclaimer":report["disclaimer"]}

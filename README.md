@@ -11,6 +11,12 @@ Self-contained hackathon MVP for KFC's F&B track: granular forecasts, residual a
 - Stable Copilot report without an API key
 - What-if simulation with an explicit non-causal disclaimer
 - FastAPI UI, endpoints, and OpenAPI docs
+- Five operational channels: dine-in, takeaway, kiosk, delivery, and app
+- Seven item-level product categories with quantity, stock-out, and category driver analysis
+- Synthetic ground-truth anomaly labels with precision/recall evaluation
+- Simulated near-real-time timestamps with measurable mean and P95 detection lag
+
+Current synthetic validation metrics are available at `GET /api/evaluation`. They are demo evidence, not claims of validation on KFC production data.
 
 ## Run (PowerShell)
 
